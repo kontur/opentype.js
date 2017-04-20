@@ -50,6 +50,32 @@ exports.getTag = function(dataView, offset) {
     return tag;
 };
 
+// UIntBase128 data type (https://www.w3.org/TR/WOFF2/#DataTypes)
+// Implementation from https://github.com/bramstein/opentype/blob/master/src/type.js
+exports.getBase128 = function(dataView, offset) {
+    var result = 0;
+    var sizeof = 0;
+    var data = null;
+
+    for (var i = 0; i < 5; i++) {
+        data = dataView.getUint8((offset || 0) + i);
+
+        if (result & 0xFE0000000) {
+            throw new Error('Base 128 number overflow');
+        }
+
+        result = (result << 7) | (data & 0x7F);
+
+        if ((data & 0x80) === 0) {
+            sizeof = i + 1;
+            // TODO better way to return the result, but somehow keep
+            // track of how much space this did take up?!
+            return {'result': result, 'size': sizeof};
+        }
+    }
+    throw new Error('Bad base 128 number');
+};
+
 // Retrieve an offset from the DataView.
 // Offsets are 1 to 4 bytes in length, depending on the offSize argument.
 exports.getOffset = function(dataView, offset, offSize) {

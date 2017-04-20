@@ -7,6 +7,7 @@
 
 'use strict';
 
+
 var inflate = require('tiny-inflate');
 
 var encoding = require('./encoding');
@@ -34,6 +35,9 @@ var _name = require('./tables/name');
 var os2 = require('./tables/os2');
 var post = require('./tables/post');
 var meta = require('./tables/meta');
+
+
+var decompress = require('brotli/decompress');
 
 /**
  * The opentype library.
@@ -134,6 +138,77 @@ function parseWOFFTableEntries(data, numTables) {
 }
 
 /**
+ * Parses WOFF2 table entries.
+ * @param  {DataView}
+ * @param  {Number}
+ * @return {Object[]}
+ */
+function parseWOFF2TableEntries(data, numTables) {
+    var tableEntries = [];
+    var p = 48; // offset to the first table directory entry.
+
+    for (var i = 0; i < numTables; i += 1) {
+        // If bits [0..5] of the flags byte have the value 63 (0x3f), 
+        // then following the flag byte is a 4-byte arbitrary tag value. 
+        // Otherwise, the tag field is omitted in the TableDirectoryEntry 
+        // structure, and is derived from bits [0..5] of the flag byte from 
+        // the fixed Known Table Tags table
+        var flags = parse.getByte(data, p);
+        var tag;
+        var processingIndex = 0;
+        if (flags == 63) {
+            // if flag set to 63 parse custom table tag
+            tag = parse.getTag(data, p + 1);
+            processingIndex += 1;
+        } else {
+            // TODO will this extract the tag, or how to get this from bits 0-5?
+            tag = parse.getTag(data, p);
+        }
+        var offset = p;
+
+        var oLength = parse.getBase128(data, p + processingIndex);
+        var origLength = oLength.result;
+        processingIndex += oLength.size;
+
+        var cLength = parse.getBase128(data, p + processingIndex );
+        var compLength = cLength.result;
+        processingIndex += cLength.size;
+
+        console.log("flags", flags)
+        console.log("tag", tag)
+        console.log("origLength", origLength)
+        console.log("compLength", compLength)
+
+        // TODO
+        // For all tables in a font, except for 'glyf' and 'loca' tables, 
+        // transformation version 0 indicates the null transform where the 
+        // original table data is passed directly to the Brotli compressor for 
+        // inclusion in the compressed data stream. For 'glyf' and 'loca' 
+        // tables, transformation version 3 indicates the null transform where 
+        // the original table data was passed directly to the Brotli compressor 
+        // without applying any pre-processing defined in subclause 5.1 and 
+        // subclause 5.3. The transformed table formats and their associated 
+        // transformation version numbers are described in details in clause 5 
+        // of this specification.
+
+        // TODO does this apply?
+        var compression = 'WOFF2';
+        if (compLength < origLength) {
+            compression = 'WOFF2';
+        } else {
+            compression = false;
+        }
+
+        tableEntries.push({tag: tag, offset: offset, compression: compression,
+            compressedLength: compLength, originalLength: origLength});
+        
+        p += processingIndex;
+    }
+
+    return tableEntries;
+}
+
+/**
  * @typedef TableData
  * @type Object
  * @property {DataView} data - The DataView
@@ -150,6 +225,17 @@ function uncompressTable(data, tableEntry) {
         var inBuffer = new Uint8Array(data.buffer, tableEntry.offset + 2, tableEntry.compressedLength - 2);
         var outBuffer = new Uint8Array(tableEntry.originalLength);
         inflate(inBuffer, outBuffer);
+        if (outBuffer.byteLength !== tableEntry.originalLength) {
+            throw new Error('Decompression error: ' + tableEntry.tag + ' decompressed length doesn\'t match recorded length');
+        }
+
+        var view = new DataView(outBuffer.buffer, 0);
+        return {data: view, offset: 0};
+    } else if (tableEntry.compression === 'WOFF2') {
+        // TODO ?!
+        var inBuffer = new Uint8Array(data.buffer, tableEntry.offset + 2, tableEntry.compressedLength - 2);
+        var outBuffer = new Uint8Array(tableEntry.originalLength);
+        outBuffer = decompress(inBuffer, data.byteLength);
         if (outBuffer.byteLength !== tableEntry.originalLength) {
             throw new Error('Decompression error: ' + tableEntry.tag + ' decompressed length doesn\'t match recorded length');
         }
@@ -204,6 +290,26 @@ function parseBuffer(buffer) {
 
         numTables = parse.getUShort(data, 12);
         tableEntries = parseWOFFTableEntries(data, numTables);
+    } else if (signature === 'wOF2') {
+        numTables = parse.getUShort(data, 12);
+        // console.log("signature",    parse.getULong(data, 0))
+        // console.log("flavor",       parse.getULong(data, 4))
+        // console.log("length",       parse.getULong(data, 8))
+        // console.log("numTables",    parse.getUShort(data, 12))        
+        // console.log("reserved",     parse.getUShort(data, 14))
+        // console.log("totalSfnt",    parse.getULong(data, 16))
+        // console.log("totalCompressedSize", parse.getULong(data, 20))
+        // console.log("major v",      parse.getUShort(data, 24))
+        // console.log("minor v",      parse.getUShort(data, 26))
+        // console.log("metaOffset",   parse.getULong(data, 28))
+        // console.log("metaLength",   parse.getULong(data, 32))
+        // console.log("metaOrigLength", parse.getULong(data, 36))
+        // console.log("privOffset",   parse.getULong(data, 40))
+        // console.log("privLength",   parse.getULong(data, 44))
+
+        // TODO what about flavor?
+
+        tableEntries = parseWOFF2TableEntries(data, numTables);
     } else {
         throw new Error('Unsupported OpenType signature ' + signature);
     }
@@ -223,6 +329,7 @@ function parseBuffer(buffer) {
     for (var i = 0; i < numTables; i += 1) {
         var tableEntry = tableEntries[i];
         var table;
+        console.log("TABLE ENTRY", tableEntry.tag, tableEntry);
         switch (tableEntry.tag) {
             case 'cmap':
                 table = uncompressTable(data, tableEntry);
